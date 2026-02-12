@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from accelerate import Accelerator, skip_first_batches
 from accelerate.logging import get_logger
-from datasets import DatasetDict, load_dataset
+from datasets import DatasetDict, load_dataset, load_from_disk
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import (
@@ -312,7 +312,16 @@ class DataCollatorWithPadding:
     def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
         # split inputs and labels since they have to be of different lengths and need
         # different padding methods
-        input_ids = {"input_ids": [feature["input_ids"] for feature in features]}
+        
+        input_ids_list = []
+        for feature in features:
+            # Ensure we are handling both lists and dictionaries
+            if isinstance(feature["input_ids"], dict):
+                input_ids_list.append(feature["input_ids"]["input_ids"])
+            else:
+                input_ids_list.append(feature["input_ids"])
+
+        input_ids = {"input_ids": input_ids_list}
         batch = self.tokenizer.pad(input_ids, return_tensors="pt", padding="longest", return_attention_mask=True)
         return batch
 
@@ -408,7 +417,7 @@ Your task is to create a single and only short text description using these keyw
 For example, given the following keywords: 'slightly roomy sounding', 'quite noisy', 'very expressive', 'very slowly', a valid description would be: '[speaker_name] speaks very slowly but has an animated delivery in an echoey room with background noise.'.
 Feel free to change the order of keywords, and to use synonyms, for example, with the previous keywords: `In a very expressive voice, [speaker_name] pronounces her words incredibly slowly. There's some background noise in this room with a bit of echo.'.
 
-For the keywords: ''[reverberation]', '[noise]', '[speech_monotony]', '[speaking_rate]', the corresponding description is:
+For the keywords: ''[reverberation]', '[noise]', '[speaking_rate]', the corresponding description is:
 """
 
 def main():
@@ -463,13 +472,16 @@ def main():
     else:
         with accelerator.local_main_process_first():
             # load all splits for annotation
-            raw_datasets = load_dataset(
-                data_args.dataset_name,
-                data_args.dataset_config_name,
-                cache_dir=model_args.cache_dir,
-                token=model_args.token,
-                num_proc=data_args.preprocessing_num_workers,
-            )
+            try:
+                raw_datasets = load_from_disk(data_args.dataset_name)
+            except FileNotFoundError:
+                raw_datasets = load_dataset(
+                    data_args.dataset_name,
+                    data_args.dataset_config_name,
+                    cache_dir=model_args.cache_dir,
+                    token=model_args.token,
+                    num_proc=data_args.preprocessing_num_workers,
+                )
 
     raw_datasets_features = set(raw_datasets[next(iter(raw_datasets))].features.keys())
 
@@ -481,6 +493,10 @@ def main():
     if data_args.is_single_speaker:
         EXPECTED_COLUMNS = {"noise", "reverberation", "speech_monotony", "speaking_rate"}
         
+    # This is a hack to get around the fact that we are not computing pitch
+    if data_args.is_single_speaker:
+        EXPECTED_COLUMNS.remove("speech_monotony")
+
     if data_args.is_new_speaker_prompt:
         EXPECTED_COLUMNS.remove("noise")
         EXPECTED_COLUMNS.add("sdr_noise")
@@ -554,6 +570,8 @@ def main():
         if is_single_speaker:
             sample_prompt = SINGLE_SPEAKER_PROMPT if not is_new_speaker_prompt else NEW_SINGLE_SPEAKER_PROMPT
             sample_prompt = sample_prompt.replace(f"[speaker_name]", speaker_name)
+            # This is a hack to get around the fact that we are not computing pitch
+            sample_prompt = sample_prompt.replace("'[speech_monotony]', ", "")
         elif (speaker_id_column and speaker_ids_to_name.get(str(sample.get(speaker_id_column)), None)):
             name =  speaker_ids_to_name.get(str(sample.get(speaker_id_column)), None)
             sample_prompt = SINGLE_SPEAKER_PROMPT if not is_new_speaker_prompt else NEW_SINGLE_SPEAKER_PROMPT

@@ -5,7 +5,8 @@ import os
 # The dataset was created in the parent directory
 # So we construct the path relative to the current script's location
 script_dir = os.path.dirname(__file__)
-dataset_path = os.path.join(script_dir, "jenny-tts-tags-6h")
+#dataset_path = os.path.join(script_dir, "jenny-tts-tags-6h")
+dataset_path = os.path.join(script_dir, "jenny-tts-tags-6h-text-bins")
 
 print(f"Loading dataset from: {dataset_path}")
 
