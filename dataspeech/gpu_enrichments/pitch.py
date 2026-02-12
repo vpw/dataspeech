@@ -1,5 +1,4 @@
-import torch 
-import penn
+import torch
 
 
 # Here we'll use a 10 millisecond hopsize
@@ -21,6 +20,12 @@ interp_unvoiced_at = .065
 
 
 def pitch_apply(batch, rank=None, audio_column_name="audio", output_column_name="utterance_pitch", penn_batch_size=4096):
+    import penn
+    # a print to be sure that the gpu is used
+    if rank == 0:
+        if torch.cuda.is_available():
+            print("Gpu `s` available for pitch computation")
+            
     if isinstance(batch[audio_column_name], list):  
         utterance_pitch_mean = []
         utterance_pitch_std = []
