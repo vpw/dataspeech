@@ -68,12 +68,17 @@ if __name__ == "__main__":
         )
 
     print("Compute snr and reverb")
+    
+    use_gpu = torch.cuda.device_count() > 0
+    snr_num_proc = torch.cuda.device_count() * args.num_workers_per_gpu_for_snr if use_gpu else args.cpu_num_workers
+    print(f"--- Attempting to use {snr_num_proc} processes for SNR/reverb computation. ---")
+
     snr_dataset = dataset.map(
         snr_apply,
         batched=True,
         batch_size=args.batch_size,
-        with_rank=True if torch.cuda.device_count()>0 else False,
-        num_proc=torch.cuda.device_count()*args.num_workers_per_gpu_for_snr if torch.cuda.device_count()>0 else args.cpu_num_workers,
+        with_rank=use_gpu,
+        num_proc=snr_num_proc,
         remove_columns=[audio_column_name], # tricks to avoid rewritting audio
         fn_kwargs={"audio_column_name": audio_column_name},
     )
