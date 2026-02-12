@@ -1,6 +1,6 @@
 from datasets import load_dataset, Audio
 from multiprocess import set_start_method
-from dataspeech import rate_apply, snr_apply, squim_apply
+from dataspeech import rate_apply, pitch_apply, snr_apply, squim_apply
 import torch
 import argparse
 
@@ -54,7 +54,8 @@ if __name__ == "__main__":
         )
 
     if not args.avoid_pitch_computation:
-        from dataspeech import pitch_apply
+        if pitch_apply is None:
+            raise ImportError("The 'penn' library is not installed. Please install it to compute pitch.")
         print("Compute pitch")
         pitch_dataset = dataset.cast_column(audio_column_name, Audio(sampling_rate=16_000)).map(
             pitch_apply,
