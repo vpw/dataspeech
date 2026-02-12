@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from datasets import load_dataset, DatasetDict
+from datasets import load_dataset, DatasetDict, load_from_disk
 from multiprocess import set_start_method
 import argparse
 from pathlib import Path
@@ -234,10 +234,16 @@ if __name__ == "__main__":
             
             dataset = []
             for dataset_name, dataset_config in zip(dataset_names, dataset_configs):
-                tmp_dataset = load_dataset(dataset_name, dataset_config, num_proc=args.cpu_num_workers)
+                try:
+                    tmp_dataset = load_from_disk(dataset_name)
+                except FileNotFoundError:
+                    tmp_dataset = load_dataset(dataset_name, dataset_config, num_proc=args.cpu_num_workers)
                 dataset.append(tmp_dataset)
         else:
-            dataset = [load_dataset(args.dataset_name, args.configuration, num_proc=args.cpu_num_workers)]
+            try:
+                dataset = [load_from_disk(args.dataset_name)]
+            except FileNotFoundError:
+                dataset = [load_dataset(args.dataset_name, args.configuration, num_proc=args.cpu_num_workers)]
             dataset_configs = [args.configuration]
     else:
         if "+" in args.dataset_name:
@@ -253,12 +259,18 @@ if __name__ == "__main__":
                     raise ValueError(f"There are {len(dataset_names)} datasets spotted but {len(output_dirs)} local paths on which to save the datasets spotted")
             
             dataset = []
-            for dataset_name, dataset_config in zip(dataset_names):
-                tmp_dataset = load_dataset(dataset_name, num_proc=args.cpu_num_workers)
+            for dataset_name in dataset_names:
+                try:
+                    tmp_dataset = load_from_disk(dataset_name)
+                except FileNotFoundError:
+                    tmp_dataset = load_dataset(dataset_name, num_proc=args.cpu_num_workers)
                 dataset.append(tmp_dataset)
 
         else:
-            dataset = [load_dataset(args.dataset_name, num_proc=args.cpu_num_workers)]
+            try:
+                dataset = [load_from_disk(args.dataset_name)]
+            except FileNotFoundError:
+                dataset = [load_dataset(args.dataset_name, num_proc=args.cpu_num_workers)]
 
     if args.plot_directory:
         Path(args.plot_directory).mkdir(parents=True, exist_ok=True)
@@ -273,7 +285,8 @@ if __name__ == "__main__":
     dataset, speaking_rate_bin_edges = bins_to_text(dataset, speaker_rate_bins, "speaking_rate", "speaking_rate", batch_size=args.batch_size, num_workers=args.cpu_num_workers, leading_split_for_bins=args.leading_split_for_bins, std_tolerance=args.speaking_rate_std_tolerance, save_dir=args.plot_directory, only_save_plot=args.only_save_plot, bin_edges=bin_edges_dict.get("speaking_rate",None), lower_range=args.speaking_rate_lower_range)
     dataset, noise_bin_edges = bins_to_text(dataset, snr_bins, "snr", "noise", batch_size=args.batch_size, num_workers=args.cpu_num_workers, leading_split_for_bins=args.leading_split_for_bins, std_tolerance=args.snr_std_tolerance, save_dir=args.plot_directory, only_save_plot=args.only_save_plot, bin_edges=bin_edges_dict.get("noise",None), lower_range=args.snr_lower_range)
     dataset, reverberation_bin_edges = bins_to_text(dataset, reverberation_bins, "c50", "reverberation", batch_size=args.batch_size, num_workers=args.cpu_num_workers, leading_split_for_bins=args.leading_split_for_bins, std_tolerance=args.reverberation_std_tolerance, save_dir=args.plot_directory, only_save_plot=args.only_save_plot, bin_edges=bin_edges_dict.get("reverberation",None))
-    dataset, speech_monotony_bin_edges = bins_to_text(dataset, utterance_level_std, "utterance_pitch_std", "speech_monotony", batch_size=args.batch_size, num_workers=args.cpu_num_workers, leading_split_for_bins=args.leading_split_for_bins, std_tolerance=args.speech_monotony_std_tolerance, save_dir=args.plot_directory, only_save_plot=args.only_save_plot, bin_edges=bin_edges_dict.get("speech_monotony",None))
+    if not args.avoid_pitch_computation:
+        dataset, speech_monotony_bin_edges = bins_to_text(dataset, utterance_level_std, "utterance_pitch_std", "speech_monotony", batch_size=args.batch_size, num_workers=args.cpu_num_workers, leading_split_for_bins=args.leading_split_for_bins, std_tolerance=args.speech_monotony_std_tolerance, save_dir=args.plot_directory, only_save_plot=args.only_save_plot, bin_edges=bin_edges_dict.get("speech_monotony",None))
 
     if args.apply_squim_quality_estimation:
         dataset, sdr_bin_edges = bins_to_text(dataset, sdr_bins, "si-sdr", "sdr_noise", batch_size=args.batch_size, num_workers=args.cpu_num_workers, leading_split_for_bins=args.leading_split_for_bins, std_tolerance=args.sdr_std_tolerance, save_dir=args.plot_directory, only_save_plot=args.only_save_plot, bin_edges=bin_edges_dict.get("si-sdr",None))
