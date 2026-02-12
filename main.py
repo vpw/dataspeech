@@ -25,6 +25,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers_per_gpu_for_snr", default=1, type=int, help="Number of workers per GPU for the SNR and reverberation estimation if GPUs are available. Defaults to 1 if some are avaiable. Useful if you want multiple processes per GPUs to maximise GPU usage.")
     parser.add_argument("--apply_squim_quality_estimation", action="store_true", help="If set, will also use torchaudio-squim estimation (SI-SNR, STOI and PESQ).")
     parser.add_argument("--num_workers_per_gpu_for_squim", default=1, type=int, help="Number of workers per GPU for the SI-SNR, STOI and PESQ estimation if GPUs are available. Defaults to 1 if some are avaiable. Useful if you want multiple processes per GPUs to maximise GPU usage.")
+    parser.add_argument("--avoid_pitch_computation", action="store_true", help="If set, will avoid computing pitch. Useful if you have trouble installing penn.")
 
 
     args = parser.parse_args()
@@ -52,16 +53,17 @@ if __name__ == "__main__":
             fn_kwargs={"audio_column_name": audio_column_name,},
         )
 
-    print("Compute pitch")
-    pitch_dataset = dataset.cast_column(audio_column_name, Audio(sampling_rate=16_000)).map(
-        pitch_apply,
-        batched=True,
-        batch_size=args.batch_size,
-        with_rank=True if torch.cuda.device_count()>0 else False,
-        num_proc=torch.cuda.device_count()*args.num_workers_per_gpu_for_pitch if torch.cuda.device_count()>0 else args.cpu_num_workers,
-        remove_columns=[audio_column_name], # tricks to avoid rewritting audio
-        fn_kwargs={"audio_column_name": audio_column_name, "penn_batch_size": args.penn_batch_size},
-    )
+    if not args.avoid_pitch_computation:
+        print("Compute pitch")
+        pitch_dataset = dataset.cast_column(audio_column_name, Audio(sampling_rate=16_000)).map(
+            pitch_apply,
+            batched=True,
+            batch_size=args.batch_size,
+            with_rank=True if torch.cuda.device_count()>0 else False,
+            num_proc=torch.cuda.device_count()*args.num_workers_per_gpu_for_pitch if torch.cuda.device_count()>0 else args.cpu_num_workers,
+            remove_columns=[audio_column_name], # tricks to avoid rewritting audio
+            fn_kwargs={"audio_column_name": audio_column_name, "penn_batch_size": args.penn_batch_size},
+        )
 
     print("Compute snr and reverb")
     snr_dataset = dataset.map(
@@ -94,7 +96,10 @@ if __name__ == "__main__":
         )
     
     for split in dataset.keys():
-        dataset[split] = pitch_dataset[split].add_column("snr", snr_dataset[split]["snr"]).add_column("c50", snr_dataset[split]["c50"])
+        if not args.avoid_pitch_computation:
+            dataset[split] = pitch_dataset[split].add_column("snr", snr_dataset[split]["snr"]).add_column("c50", snr_dataset[split]["c50"])
+        else:
+            dataset[split] = snr_dataset[split]
         if "speech_duration" in snr_dataset[split]:
             dataset[split] = dataset[split].add_column("speech_duration", snr_dataset[split]["speech_duration"])
         dataset[split] = dataset[split].add_column("speaking_rate", rate_dataset[split]["speaking_rate"]).add_column("phonemes", rate_dataset[split]["phonemes"])
@@ -110,4 +115,4 @@ if __name__ == "__main__":
             dataset.push_to_hub(args.repo_id, args.configuration)
         else:
             dataset.push_to_hub(args.repo_id)
-    
+
