@@ -611,7 +611,17 @@ def main():
         return output_ids
 
     def postprocess_dataset(batch):
-        prompt_texts = tokenizer.batch_decode(batch["input_ids"], skip_special_tokens=True)
+        # The 'input_ids' column might contain dicts instead of lists of ints.
+        # We need to extract the list of ints before decoding.
+        input_ids_for_decode = []
+        for item in batch["input_ids"]:
+            if isinstance(item, dict):
+                # Assuming the dict has a key 'input_ids' which holds the list
+                input_ids_for_decode.append(item.get("input_ids", []))
+            else:
+                input_ids_for_decode.append(item)
+
+        prompt_texts = tokenizer.batch_decode(input_ids_for_decode, skip_special_tokens=True)
         generated_texts = tokenizer.batch_decode(batch["generated_ids"], skip_special_tokens=True)
         
         batch["text_description"] = [generated_text[len(prompt_text) :] for (prompt_text, generated_text) in zip(prompt_texts, generated_texts)]
