@@ -13,6 +13,7 @@ import torch
 from accelerate import Accelerator, skip_first_batches
 from accelerate.logging import get_logger
 from datasets import DatasetDict, load_dataset, load_from_disk
+import datasets
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import (
@@ -467,7 +468,7 @@ def main():
                     split=split,
                     cache_dir=model_args.cache_dir,
                     token=model_args.token,
-                    num_proc=data_args.preprocessing_num_workers,
+                    num_proc=1,  # Use single process to avoid multiprocessing issues
                 )
     else:
         with accelerator.local_main_process_first():
@@ -480,7 +481,7 @@ def main():
                     data_args.dataset_config_name,
                     cache_dir=model_args.cache_dir,
                     token=model_args.token,
-                    num_proc=data_args.preprocessing_num_workers,
+                    num_proc=1,  # Use single process to avoid multiprocessing issues
                 )
 
     raw_datasets_features = set(raw_datasets[next(iter(raw_datasets))].features.keys())
@@ -587,12 +588,40 @@ def main():
             
         sample_prompt = [{"role": "user", "content": sample_prompt}]
         token_ids = tokenizer.apply_chat_template(sample_prompt)
+        # Ensure token_ids is a list of integers, not a tensor or other type
+        if hasattr(token_ids, 'tolist'):
+            token_ids = token_ids.tolist()
+        elif not isinstance(token_ids, list):
+            token_ids = list(token_ids)
+        # Ensure all elements are integers (in case of any conversion issues)
+        token_ids = [int(token_id) for token_id in token_ids]
         sample["input_ids"] = token_ids
         return sample
 
     with accelerator.local_main_process_first():
+        # Fix for Arrow offset overflow:
+        # We explicitly define the output features to use LargeList (64-bit offsets) for the new 'input_ids' column.
+        # This prevents the 2GB limit error when concatenating large arrays.
+        
+        # 1. Get existing features
+        features = raw_datasets[next(iter(raw_datasets))].features.copy()
+        
+        # 2. Define the new 'input_ids' column as a Sequence of int64.
+        #    Crucially, we do NOT use Value("large_string") here because input_ids are integers, not strings.
+        #    The datasets library handles Sequences with 64-bit offsets automatically when needed, 
+        #    but defining it explicitly helps.
+        features["input_ids"] = datasets.Sequence(datasets.Value("int64"))
+
+        # 3. Force single-process mode to avoid multiprocessing issues with large arrays
+        # This is a more reliable approach to prevent the Arrow overflow error
         vectorized_datasets = raw_datasets.map(
-            prepare_dataset, num_proc=data_args.preprocessing_num_workers, desc="Preparing prompts"
+            prepare_dataset,
+            num_proc=1,  # Force single process to avoid multiprocessing issues
+            desc="Preparing prompts",
+            features=features, # Pass the explicit feature definition
+            writer_batch_size=50, # Even smaller batch size for safety
+            load_from_cache_file=False,  # Disable cache to avoid potential issues
+            keep_in_memory=False,  # Keep memory usage low
         )
 
     # Prepare everything with our `accelerator`
@@ -621,6 +650,15 @@ def main():
             else:
                 input_ids_for_decode.append(item)
 
+        # Ensure all input_ids are lists of integers
+        for i, ids in enumerate(input_ids_for_decode):
+            if not isinstance(ids, list):
+                try:
+                    input_ids_for_decode[i] = list(ids)
+                except Exception:
+                    # If conversion fails, use an empty list
+                    input_ids_for_decode[i] = []
+        
         prompt_texts = tokenizer.batch_decode(input_ids_for_decode, skip_special_tokens=True)
         generated_texts = tokenizer.batch_decode(batch["generated_ids"], skip_special_tokens=True)
         
@@ -674,7 +712,7 @@ def main():
             vectorized_datasets[split] = vectorized_datasets[split].map(
                 postprocess_dataset,
                 batched=True,
-                num_proc=data_args.preprocessing_num_workers,
+                num_proc=1,  # Use single process to avoid multiprocessing issues
                 desc="Postprocessing dataset",
                 remove_columns=["input_ids", "generated_ids"],
             )

@@ -1,8 +1,10 @@
-from datasets import load_dataset, Audio
+from datasets import load_dataset, load_from_disk, Audio
+import os
 from multiprocess import set_start_method
 from dataspeech import rate_apply, pitch_apply, snr_apply, squim_apply
 import torch
 import argparse
+import sys
 
 
 if __name__ == "__main__":
@@ -26,19 +28,132 @@ if __name__ == "__main__":
     parser.add_argument("--apply_squim_quality_estimation", action="store_true", help="If set, will also use torchaudio-squim estimation (SI-SNR, STOI and PESQ).")
     parser.add_argument("--num_workers_per_gpu_for_squim", default=1, type=int, help="Number of workers per GPU for the SI-SNR, STOI and PESQ estimation if GPUs are available. Defaults to 1 if some are avaiable. Useful if you want multiple processes per GPUs to maximise GPU usage.")
     parser.add_argument("--avoid_pitch_computation", action="store_true", help="If set, will avoid computing pitch. Useful if you have trouble installing penn.")
+    parser.add_argument(
+        "--dataset_format",
+        choices=["auto", "arrow", "parquet", "hf"],
+        default="auto",
+        help="Force dataset loading method: 'arrow' -> load_from_disk, 'parquet' -> load parquet files, 'hf' -> load by HF id, 'auto' -> detect",
+    )
+
+    parser.add_argument(
+        "--cast_audio",
+        action="store_true",
+        help="If set, cast the audio column to datasets.Audio(sampling_rate=...) before enrichments.",
+    )
+    parser.add_argument(
+        "--cast_sampling_rate",
+        type=int,
+        default=16_000,
+        help="Sampling rate to use when casting the audio column (default: 16000).",
+    )
 
 
     args = parser.parse_args()
     
-    if args.configuration:
-        dataset = load_dataset(args.dataset_name, args.configuration, num_proc=args.cpu_num_workers,)
-    else:
-        dataset = load_dataset(args.dataset_name, num_proc=args.cpu_num_workers,)
+    # If the provided path looks like an Arrow-on-disk dataset (save_to_disk output),
+    # prefer load_from_disk which directly loads the Arrow dataset. This avoids
+    # format inference errors when a directory contains Arrow files.
+    dataset_path = args.dataset_name
+    # detect Arrow-on-disk layout by checking for dataset_info.json, .arrow files,
+    # or an 'arrow' subdirectory anywhere inside the provided path (depth=2).
+    def detect_arrow_layout(path):
+        try:
+            if not os.path.isdir(path):
+                return False
+            # direct indicators
+            if os.path.exists(os.path.join(path, "dataset_info.json")):
+                return True
+            if os.path.isdir(os.path.join(path, "arrow")):
+                return True
+            # look for any .arrow files at top level or one level down
+            for entry in os.listdir(path):
+                if entry.endswith('.arrow'):
+                    return True
+                full = os.path.join(path, entry)
+                if os.path.isdir(full):
+                    try:
+                        for sub in os.listdir(full):
+                            if sub.endswith('.arrow'):
+                                return True
+                    except Exception:
+                        pass
+            return False
+        except Exception:
+            return False
+
+    # If user explicitly set dataset_format, honor it; otherwise use auto-detection.
+    fmt = args.dataset_format
+
+    def try_load_from_disk(p):
+        try:
+            print(f"Attempting to load Arrow dataset from: {p}")
+            ds = load_from_disk(p)
+            print(f"Loaded Arrow dataset from disk: {p}")
+            return ds
+        except Exception as e:
+            print(f"load_from_disk failed for {p}: {e}")
+            return None
+
+    dataset = None
+    if fmt == "arrow":
+        dataset = try_load_from_disk(dataset_path) or try_load_from_disk(os.path.realpath(dataset_path))
+        if dataset is None:
+            print("ERROR: --dataset_format=arrow but load_from_disk failed. Aborting.")
+            sys.exit(2)
+    elif fmt == "parquet":
+        # If a directory was provided, look for parquet files inside
+        if os.path.isdir(dataset_path):
+            data_files = os.path.join(dataset_path, "*.parquet")
+        else:
+            data_files = dataset_path
+        try:
+            dataset = load_dataset("parquet", data_files=data_files)
+            print(f"Loaded parquet dataset from: {data_files}")
+        except Exception as e:
+            print(f"ERROR: failed to load parquet dataset from {data_files}: {e}")
+            sys.exit(3)
+    elif fmt == "hf":
+        try:
+            if args.configuration:
+                dataset = load_dataset(dataset_path, args.configuration, num_proc=args.cpu_num_workers)
+            else:
+                dataset = load_dataset(dataset_path, num_proc=args.cpu_num_workers)
+            print(f"Loaded HuggingFace dataset id: {dataset_path}")
+        except Exception as e:
+            print(f"ERROR: failed to load HuggingFace dataset {dataset_path}: {e}")
+            sys.exit(4)
+    else:  # auto
+        is_arrow_on_disk = detect_arrow_layout(dataset_path)
+        if is_arrow_on_disk:
+            dataset = try_load_from_disk(dataset_path) or try_load_from_disk(os.path.realpath(dataset_path))
+            if dataset is None:
+                print("Detected Arrow layout but load_from_disk failed. Aborting to avoid ambiguous load_dataset inference.")
+                sys.exit(5)
+        else:
+            if args.configuration:
+                dataset = load_dataset(args.dataset_name, args.configuration, num_proc=args.cpu_num_workers,)
+            else:
+                dataset = load_dataset(args.dataset_name, num_proc=args.cpu_num_workers,)
         
     audio_column_name = "audio" if args.rename_column else args.audio_column_name
     text_column_name = "text" if args.rename_column else args.text_column_name
     if args.rename_column:
         dataset = dataset.rename_columns({args.audio_column_name: "audio", args.text_column_name: "text"})
+        
+    # Optionally cast audio column to Audio feature to normalize input representation
+    if args.cast_audio:
+        print(f"Casting audio column '{audio_column_name}' to Audio(sampling_rate={args.cast_sampling_rate})...")
+        try:
+            if hasattr(dataset, "keys"):
+                # DatasetDict
+                for split in list(dataset.keys()):
+                    dataset[split] = dataset[split].cast_column(audio_column_name, Audio(sampling_rate=args.cast_sampling_rate))
+            else:
+                dataset = dataset.cast_column(audio_column_name, Audio(sampling_rate=args.cast_sampling_rate))
+            print("Casting complete.")
+        except Exception as e:
+            print(f"ERROR casting audio column: {e}")
+            print("Proceeding without casting.")
         
 
     if args.apply_squim_quality_estimation:
